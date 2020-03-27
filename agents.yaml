@@ -161,8 +161,7 @@ spec:
             configMapKeyRef:
               name: cluster-config
               key: cluster_location
-        image: gcr.io/stackdriver-agents/stackdriver-logging-agent:1.6.33
-        imagePullPolicy: IfNotPresent
+        image: gcr.io/chelseychen-gke-test/chelseychen-fluentd:latest
         livenessProbe:
           exec:
             command:
@@ -352,9 +351,16 @@ data:
         # "k8s-pod-labels" to distinguish with other labels and avoid
         # label name collision with other types of labels.
         _dummy_ ${if record.is_a?(Hash) && record.has_key?('kubernetes') && record['kubernetes'].has_key?('labels') && record['kubernetes']['labels'].is_a?(Hash); then; record["logging.googleapis.com/labels"] = record['kubernetes']['labels'].map{ |k, v| ["k8s-pod-label/#{k}", v]}.to_h; end; nil}
+        # Extract "kubernetes"->"namespace_name" and if it's a system namespace
+        # (i.e., "kube-system", "istio-system", "knative-serving", "gke-system",
+        # "config-management-system", "gke-connect", "monitoring-system",
+        # "gatekeeper-system" or "cnrm-system"),
+        # set a "gke.googleapis.com/log_type" label with value "system" under
+        # "logging.googleapis.com/labels".
+        _dummy_namespace_ ${if ["kube-system", "istio-system", "knative-serving", "gke-system", "config-management-system", "gke-connect", "monitoring-system", "gatekeeper-system", "cnrm-system"].include?("#{tag.split('.', 5)[-1].rpartition('.')[0].split('_')[1]}"); then; if record["logging.googleapis.com/labels"].nil?; then; record["logging.googleapis.com/labels"] = Hash.new; end; record["logging.googleapis.com/labels"].merge!({ "gke.googleapis.com/log_type" => "system" }); end; nil}
       </record>
       # Delete this dummy field and the rest of "kubernetes" and "docker".
-      remove_keys _dummy_,kubernetes,docker
+      remove_keys _dummy_,_dummy_namespace_,kubernetes,docker
     </filter>
 
     <match reform.**>
@@ -756,6 +762,18 @@ data:
       </record>
     </filter>
 
+    <filter {docker,container-runtime,kubelet,kubelet-monitor,node-problem-detector,kube-container-runtime-monitor,node-journal}>
+      @type record_modifier
+      enable_ruby true
+      <record>
+        # Set a "gke.googleapis.com/log_type" label with value "system" under
+        # "logging.googleapis.com/labels" for non-containerized systemd logs.
+        _dummy_ ${if record["logging.googleapis.com/labels"].nil?; then; record["logging.googleapis.com/labels"] = Hash.new; end; record["logging.googleapis.com/labels"].merge!({ "gke.googleapis.com/log_type" => "system" }); nil}
+      </record>
+      # Delete this dummy field.
+      remove_keys _dummy_
+    </filter>
+
     # This section is exclusive for 'k8s_node' logs. These logs come with tags
     # that are neither 'stderr' or 'stdout'.
     # We use a separate output stanza for 'k8s_container' logs with a larger
@@ -782,6 +800,7 @@ data:
       k8s_cluster_location "#{ENV["CLUSTER_LOCATION"]}"
       adjust_invalid_timestamps false
     </match>
+
 
 ---
 apiVersion: extensions/v1beta1
@@ -826,7 +845,7 @@ spec:
         args:
         - -logtostderr
         - -v=1
-        image: gcr.io/stackdriver-agents/metadata-agent-go:1.0.1
+        image: gcr.io/stackdriver-agents/metadata-agent-go:1.0.6
         imagePullPolicy: IfNotPresent
         name: metadata-agent
         resources:
